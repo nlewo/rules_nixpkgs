@@ -26,7 +26,6 @@ nixpkgs_git_repository = repository_rule(
 )
 
 def _nixpkgs_local_repository_impl(repository_ctx):
-    repository_ctx.file("BUILD")
     if not bool(repository_ctx.attr.nix_file) != \
        bool(repository_ctx.attr.nix_file_content):
         fail("Specify one of 'nix_file' or 'nix_file_content' (but not both).")
@@ -36,12 +35,33 @@ def _nixpkgs_local_repository_impl(repository_ctx):
             content = repository_ctx.attr.nix_file_content,
             executable = False,
         )
-        target = repository_ctx.path("default.nix")
+        target_filename = "default.nix"
+        target = repository_ctx.path(target_filename)
     else:
-        target = _cp(repository_ctx, repository_ctx.attr.nix_file)
+        target_filename = repository_ctx.attr.nix_file
+        target = _cp(repository_ctx, target_filename)
+
 
     for dep in repository_ctx.attr.nix_file_deps:
         _cp(repository_ctx, dep)
+
+    # Export all specified Nix files to make them dependencies of a
+    # nixpkgs_package rule.
+    dep_files = ", ".join([
+        '"{}"'.format(dep.name)
+        for dep in repository_ctx.attr.nix_file_deps
+    ])
+    export_files = 'exports_files(["{}", {}])'.format(
+        target_filename.name,
+        dep_files)
+    repository_ctx.file("BUILD", content = export_files)
+
+    # Create a file listing all Nix files of this repository. This
+    # file is used by the nixpgks_package rule to register all Nix
+    # files.
+    dep_files = [dep.name for dep in repository_ctx.attr.nix_file_deps]
+    repository_files = [target_filename.name] + dep_files
+    repository_ctx.file("repository-files", content = "\n".join(repository_files))
 
     # Make "@nixpkgs" (syntactic sugar for "@nixpkgs//:nixpkgs") a valid
     # label for the target Nix file.
@@ -123,6 +143,14 @@ def _nixpkgs_package_impl(repository_ctx):
     ])
 
     expr_args.extend(repository_ctx.attr.nixopts)
+
+    for (target, path_name) in repositories.items():
+        path = str(repository_ctx.path(target).dirname) + "/repository-files"
+        content = repository_ctx.read(path)
+        for f in content.splitlines():
+            # Hack: this is to register all Nix files as dependencies
+            # of this rule (see issue #113)
+            repository_ctx.path(Label("@{}//:{}".format(path_name, f)))
 
     # If repositories is not set, leave empty so nix will fail
     # unless a pinned nixpkgs is set in the `nix_file` attribute.
